@@ -4,7 +4,7 @@ I created this service as a temporary workaround against DDoS attacks. On my ema
 
 IMPORTANT: this code was produced with the help of AI. It may contain mistakes or not cover every edge case. Do NOT run this blindly in production — review, test, and audit carefully before deploying in any production environment.
 
-Table of contents
+### Table of contents
 - Project summary
 - Features
 - Requirements
@@ -21,7 +21,7 @@ Table of contents
 - Contributing
 - License
 
-Project summary
+#### Project summary
 - Periodically checks services (default every 120s) on a configured host (default 127.0.0.1).
 - If a service fails after configured retries, sends a single Gotify notification stating which service(s) failed and that a restart is being attempted.
 - Attempts to restart the configured container by calling the Docker Engine HTTP API over the host unix socket (no docker CLI or docker SDK used).
@@ -29,20 +29,20 @@ Project summary
 - If services remain unreachable after a final timeout window, sends one high-priority Gotify notification requesting manual intervention.
 - Logs to stdout so Docker captures logs (follow Docker logging best practices).
 
-Features
+#### Features
 - Lightweight Go single-binary (static) image produced by a multi-stage Docker build.
 - Minimal notifications (one on failure/start restart, one on success, one on escalation).
 - Uses unix socket HTTP API to avoid heavy docker SDK dependency issues.
 - Configurable via environment variables or CLI flags (for local testing).
 - Runs as a long-lived service on a configurable schedule; handles SIGINT/SIGTERM gracefully.
 
-Requirements
+#### Requirements
 - Docker engine running on the host (if restarting containers).
 - Gotify server reachable and an application token.
 - If running in Docker with docker socket mount: the container process UID:GID must have permission to access `/var/run/docker.sock` (see Security section).
 - Go 1.24 (only needed for local builds, not to run the container image).
 
-Configuration (env vars & flags)
+#### Configuration (env vars & flags)
 - GOTIFY_URL (required) — full base URL to your Gotify server (e.g., `https://gotify.example`).
 - GOTIFY_TOKEN (required) — Gotify application token (X-Gotify-Key).
 - HOST — host to check (default `127.0.0.1`).
@@ -60,12 +60,12 @@ Configuration (env vars & flags)
 - GOTIFY_PRIORITY — default priority for normal gotify messages (0..10, default `5`).
 - CHECK_INTERVAL_SECONDS — seconds between scheduled checks (default `120`).
 
-Notes:
+#### Notes:
 - Environment variables and CLI flags are supported; env vars take precedence.
 - SERVICES must be comma-separated with no spaces (the app trims individual items).
 
 
-Running with Docker Compose
+#### Running with Docker Compose
 1. Copy  `.env.example` to `.env` and edit where necessary
 2. Build and start:
    ```
@@ -73,10 +73,10 @@ Running with Docker Compose
    ```
 3. Follow logs:
    ```
-  docker compose logs -f email-server-monitoring
+   docker compose logs -f email-server-monitoring
    ```
 
-Running locally (non-container)
+#### Running locally (non-container)
 - To build a Linux static binary:
   ```
   GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o email-server-monitoring ./main.go
@@ -86,11 +86,11 @@ Running locally (non-container)
   GOTIFY_URL=https://gotify.example GOTIFY_TOKEN=token ./email-server-monitoring
   ```
 
-Logs, metrics and observability
+#### Logs, metrics and observability
 - The app logs to stdout/stderr. Use `docker logs` or your logging driver to collect logs centrally.
 - Recommended: configure Docker logging driver with size rotation (json-file with max-size / max-file) or forward to a centralized logging stack.
 
-Security considerations
+#### Security considerations
 - Mounting `/var/run/docker.sock` gives the container effective control over Docker and the host. Treat it as sensitive:
   - Limit who can deploy/update the compose stack.
   - Prefer mapping the container user to the docker socket group (PUID/PGID) instead of running as root.
@@ -99,7 +99,7 @@ Security considerations
 - The service does not perform authenticated checks against monitored services (non-intrusive checks). If you add auth checks, protect any credentials.
 - IMPORTANT: this project was produced with AI assistance. It should be carefully reviewed, tested, and audited before any production use.
 
-Tuning and behavior
+#### Tuning and behavior
 - Default schedule: runs an immediate check on startup then every CHECK_INTERVAL_SECONDS (default 120s).
 - Single failure cycle behavior:
   - If any service fails after RETRIES attempts, send single Gotify failure message, restart container, wait POST_RESTART_WAIT, re-check with longer timeouts.
@@ -107,7 +107,7 @@ Tuning and behavior
   - If not recovered within the final window, send one high-priority escalation message.
 - The app does not repeatedly spam notifications: it sends minimal messages per failure cycle.
 
-Troubleshooting (common errors)
+#### Troubleshooting (common errors)
 - Permission denied when accessing docker socket:
   - Check host socket ownership: `stat -c '%U:%G %a %n' /var/run/docker.sock`
   - Ensure container process UID:GID can access socket; set `user: "${PUID}:${PGID}"` in docker-compose and set PUID/PGID in `.env`.
@@ -117,7 +117,7 @@ Troubleshooting (common errors)
   - Verify GOTIFY_URL reachable and GOTIFY_TOKEN is correct.
   - Test manually: `curl -X POST -H "X-Gotify-Key: TOKEN" -d "message=hello" GOTIFY_URL/message`
 
-Development & building
+#### Development & building
 - Build image (single-arch):
   ```
   docker build -t email-server-monitoring:latest .
@@ -157,7 +157,7 @@ Development & building
 - Run unit testing: add tests for check functions (not included by default).
 - Local run: see Running locally section.
 
-Roadmap & wishlist (maybe)
+#### Roadmap & wishlist (maybe)
 - [ ] Add Apprise support as an alternative notifier (Apprise supports many backends).
 - [ ] Make notifier pluggable (Gotify, Apprise, email, Slack, PagerDuty, etc.).
 - [ ] Add optional file logging with rotation (lumberjack) in addition to stdout.
@@ -177,10 +177,9 @@ Roadmap & wishlist (maybe)
 - [ ] Add onboarding docs, examples and troubleshooting guides for common platforms (Ubuntu, Debian, RHEL).
 - [ ] Localization / i18n for notification messages.
 
-Contributing
+#### Contributing
 - Fork, implement changes in a topic branch, open a pull request with tests and description.
 - Include unit tests for new behavior and keep changes focused.
 
-License
+#### License
 - GPL-3.0
-```
