@@ -1,0 +1,16 @@
+# Exclude version control, local files and build artifacts
+.git
+.gitignore
+README.md
+.env
+.env.*
+
+# Local build artifacts and binary
+email-server-monitoring
+
+# Editor folders
+.vscode/
+.idea/
+
+# Avoid copying local Docker / CI files if not needed
+.dockerignore

@@ -1,0 +1,38 @@
+services:
+  email-server-monitoring:
+    build: .
+    args:
+        TARGETOS: linux
+        TARGETARCH: arm64
+        VERSION: v0.0.1
+        BUILD_DATE: 2025-10-08T01:00:00Z
+        VCS_REF: main
+    image: email-server-monitoring:latest
+    restart: unless-stopped
+    container_name: email-server-monitoring
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    user: "${PUID:-1000}:${PGID:-996}"
+    environment:
+      GOTIFY_URL: "${GOTIFY_URL}"
+      GOTIFY_TOKEN: "${GOTIFY_TOKEN}"
+      HOST: "${HOST:-127.0.0.1}"
+      SERVICES: "${SERVICES:-SMTP:25,SMTPS:465,IMAPS:993,HTTPS:443}"
+      CONTAINER_NAME: "${CONTAINER_NAME:-stalwart}"
+      RETRIES: "${RETRIES:-3}"
+      PER_ATTEMPT_TIMEOUT: "${PER_ATTEMPT_TIMEOUT:-5}"
+      SLEEP_BETWEEN_ATTEMPTS: "${SLEEP_BETWEEN_ATTEMPTS:-5}"
+      POST_RESTART_WAIT: "${POST_RESTART_WAIT:-15}"
+      POST_RESTART_PER_ATTEMPT_TIMEOUT: "${POST_RESTART_PER_ATTEMPT_TIMEOUT:-15}"
+      POST_RESTART_FINAL_TIMEOUT: "${POST_RESTART_FINAL_TIMEOUT:-60}"
+      POST_RESTART_POLL_INTERVAL: "${POST_RESTART_POLL_INTERVAL:-10}"
+    deploy:
+      resources:
+        limits:
+          cpus: '0.1'
+          memory: 32M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"

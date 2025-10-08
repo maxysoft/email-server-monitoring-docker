@@ -1,0 +1,8 @@
+.env
+
+# Local build artifacts and binary
+email-server-monitoring
+
+# Editor folders
+.vscode/
+.idea/
