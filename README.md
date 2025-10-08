@@ -1,6 +1,3 @@
-```markdown
-# email-server-monitoring
-
 A small Go service that monitors local service ports (SMTP/SMTPS/IMAPS/HTTPS), sends minimal Gotify notifications on failures, and attempts to restart a target Docker container (default: `stalwart`) via the Docker Engine socket. Designed to run in Docker (docker-compose provided), with small footprint and no heavy SDK dependencies.
 
 I created this service as a temporary workaround against DDoS attacks. On my email server running Stalwart I have various firewall rules, rate-limits, sysctl tweaks, fail2ban, etc., but sometimes the server stops responding and the only solution is restarting Stalwart. I know this is not a real solution, but at least it gives me a bit more peace of mind if the above problem occurs while I look for the root cause. Why I shared this code I don’t know — maybe it could be useful to someone.
@@ -66,6 +63,7 @@ Configuration (env vars & flags)
 Notes:
 - Environment variables and CLI flags are supported; env vars take precedence.
 - SERVICES must be comma-separated with no spaces (the app trims individual items).
+
 
 Running with Docker Compose
 1. Copy  `.env.example` to `.env` and edit where necessary
