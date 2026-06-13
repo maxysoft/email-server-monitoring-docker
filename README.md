@@ -1,10 +1,13 @@
-A small Go service that monitors local service ports (SMTP/SMTPS/IMAPS/HTTPS), sends minimal Gotify notifications on failures, and attempts to restart a target Docker container (default: `stalwart`) via the Docker Engine socket. Designed to run in Docker (docker-compose provided), with small footprint and no heavy SDK dependencies.
+# Email Server Monitoring Docker
+
+A small Go service that monitors local service ports (SMTP/SMTPS/IMAPS/HTTP/HTTPS), sends minimal Gotify notifications on failures, and attempts to restart a target Docker container (default: `stalwart`) via the Docker Engine socket. Designed to run in Docker (docker-compose provided), with small footprint and no heavy SDK dependencies.
 
 I created this service as a temporary workaround against DDoS attacks. On my email server running Stalwart I have various firewall rules, rate-limits, sysctl tweaks, fail2ban, etc., but sometimes the server stops responding and the only solution is restarting Stalwart. I know this is not a real solution, but at least it gives me a bit more peace of mind if the above problem occurs while I look for the root cause. Why I shared this code I don’t know — maybe it could be useful to someone.
 
 IMPORTANT: this code was produced with the help of AI. It may contain mistakes or not cover every edge case. Do NOT run this blindly in production — review, test, and audit carefully before deploying in any production environment.
 
-### Table of contents
+## Table of contents
+
 - Project summary
 - Features
 - Requirements
@@ -21,7 +24,8 @@ IMPORTANT: this code was produced with the help of AI. It may contain mistakes o
 - Contributing
 - License
 
-#### Project summary
+### Project summary
+
 - Periodically checks services (default every 120s) on a configured host (default 127.0.0.1).
 - If a service fails after configured retries, sends a single Gotify notification stating which service(s) failed and that a restart is being attempted.
 - Attempts to restart the configured container by calling the Docker Engine HTTP API over the host unix socket (no docker CLI or docker SDK used).
@@ -29,25 +33,30 @@ IMPORTANT: this code was produced with the help of AI. It may contain mistakes o
 - If services remain unreachable after a final timeout window, sends one high-priority Gotify notification requesting manual intervention.
 - Logs to stdout so Docker captures logs (follow Docker logging best practices).
 
-#### Features
+### Features
+
 - Lightweight Go single-binary (static) image produced by a multi-stage Docker build.
 - Minimal notifications (one on failure/start restart, one on success, one on escalation).
 - Uses unix socket HTTP API to avoid heavy docker SDK dependency issues.
 - Configurable via environment variables or CLI flags (for local testing).
 - Runs as a long-lived service on a configurable schedule; handles SIGINT/SIGTERM gracefully.
 
-#### Requirements
+### Requirements
+
 - Docker engine running on the host (if restarting containers).
 - Gotify server reachable and an application token.
 - If running in Docker with docker socket mount: the container process UID:GID must have permission to access `/var/run/docker.sock` (see Security section).
-- Go 1.24 (only needed for local builds, not to run the container image).
+- Go 1.25 (only needed for local builds, not to run the container image).
 
-#### Configuration (env vars & flags)
+### Configuration (env vars & flags)
+
 - GOTIFY_URL (required) — full base URL to your Gotify server (e.g., `https://gotify.example`).
 - GOTIFY_TOKEN (required) — Gotify application token (X-Gotify-Key).
 - HOST — host to check (default `127.0.0.1`).
 - SERVICES — comma-separated list of NAME:PORT entries (default `SMTP:25,SMTPS:465,IMAPS:993,HTTPS:443`).
-  - Example: `SERVICES=SMTP:25,IMAPS:993,HTTPS:443`
+  - Supported NAMEs: `SMTP` (banner `220` check), `SMTPS`/`IMAPS` (TLS handshake), `HTTP`/`HTTPS` (HEAD request + status check). Anything else falls back to a plain TCP connect.
+  - Example: `SERVICES=SMTP:25,IMAPS:993,HTTP:80,HTTPS:443`
+- HTTP_EXPECTED_STATUS — comma-separated HTTP status codes treated as "up" for both HTTP and HTTPS probes (default `200`). Widen if the service answers behind a redirect/auth gate, e.g. `200,301,302,401`. A healthy server is expected to return one of these; any other status (or a connection error) is treated as down.
 - CONTAINER_NAME — container name to restart (default `stalwart`).
 - DOCKER_SOCKET — path to docker socket inside container (default `/var/run/docker.sock`).
 - RETRIES — number of attempts per check (default `3`).
@@ -60,37 +69,58 @@ IMPORTANT: this code was produced with the help of AI. It may contain mistakes o
 - GOTIFY_PRIORITY — default priority for normal gotify messages (0..10, default `5`).
 - CHECK_INTERVAL_SECONDS — seconds between scheduled checks (default `120`).
 
-#### Notes:
+### Notes
+
 - Environment variables and CLI flags are supported; env vars take precedence.
 - SERVICES must be comma-separated with no spaces (the app trims individual items).
 
+### Running with Docker Compose
 
-#### Running with Docker Compose
-1. Copy  `.env.example` to `.env` and edit where necessary
-2. Build and start:
+All runtime configuration is loaded from `.env` via the compose `env_file:` directive (no inline `environment:` block). `GOTIFY_URL` and `GOTIFY_TOKEN` are required; everything else falls back to in-app defaults.
+
+1. Copy `.env.example` to `.env` and edit where necessary.
+2. Build and start (the provided `Makefile` auto-fills `BUILD_DATE`/`VCS_REF`/`VERSION`):
+
+   ```bash
+   make up
    ```
-   docker compose up -d --build
+
+   Or with plain compose (build metadata interpolated from the environment):
+
+   ```bash
+   BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ) VCS_REF=$(git rev-parse --short HEAD) \
+     VERSION=$(cat VERSION) docker compose up -d --build
    ```
+
 3. Follow logs:
-   ```
-   docker compose logs -f email-server-monitoring
+
+   ```bash
+   make logs        # or: docker compose logs -f email-server-monitoring
    ```
 
-#### Running locally (non-container)
+`docker compose up -d --build` still works on its own, but `BUILD_DATE`/`VCS_REF`/`VERSION` will fall back to their compose defaults (`unknown`/`main`/`v0.0.0`) unless exported.
+
+### Running locally (non-container)
+
 - To build a Linux static binary:
-  ```
+
+  ```bash
   GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o email-server-monitoring ./main.go
   ```
+
 - Run with environment:
-  ```
+
+  ```bash
   GOTIFY_URL=https://gotify.example GOTIFY_TOKEN=token ./email-server-monitoring
   ```
 
-#### Logs, metrics and observability
+### Logs, metrics and observability
+
 - The app logs to stdout/stderr. Use `docker logs` or your logging driver to collect logs centrally.
 - Recommended: configure Docker logging driver with size rotation (json-file with max-size / max-file) or forward to a centralized logging stack.
 
-#### Security considerations
+### Security considerations
+
 - Mounting `/var/run/docker.sock` gives the container effective control over Docker and the host. Treat it as sensitive:
   - Limit who can deploy/update the compose stack.
   - Prefer mapping the container user to the docker socket group (PUID/PGID) instead of running as root.
@@ -99,7 +129,8 @@ IMPORTANT: this code was produced with the help of AI. It may contain mistakes o
 - The service does not perform authenticated checks against monitored services (non-intrusive checks). If you add auth checks, protect any credentials.
 - IMPORTANT: this project was produced with AI assistance. It should be carefully reviewed, tested, and audited before any production use.
 
-#### Tuning and behavior
+### Tuning and behavior
+
 - Default schedule: runs an immediate check on startup then every CHECK_INTERVAL_SECONDS (default 120s).
 - Single failure cycle behavior:
   - If any service fails after RETRIES attempts, send single Gotify failure message, restart container, wait POST_RESTART_WAIT, re-check with longer timeouts.
@@ -107,7 +138,8 @@ IMPORTANT: this code was produced with the help of AI. It may contain mistakes o
   - If not recovered within the final window, send one high-priority escalation message.
 - The app does not repeatedly spam notifications: it sends minimal messages per failure cycle.
 
-#### Troubleshooting (common errors)
+### Troubleshooting (common errors)
+
 - Permission denied when accessing docker socket:
   - Check host socket ownership: `stat -c '%U:%G %a %n' /var/run/docker.sock`
   - Ensure container process UID:GID can access socket; set `user: "${PUID}:${PGID}"` in docker-compose and set PUID/PGID in `.env`.
@@ -117,14 +149,17 @@ IMPORTANT: this code was produced with the help of AI. It may contain mistakes o
   - Verify GOTIFY_URL reachable and GOTIFY_TOKEN is correct.
   - Test manually: `curl -X POST -H "X-Gotify-Key: TOKEN" -d "message=hello" GOTIFY_URL/message`
 
-#### Development & building
+### Development & building
+
 - Build image (single-arch):
-  ```
+
+  ```bash
   docker build -t email-server-monitoring:latest .
   ```
 
 - Build multi-arch images (recommended for publishing):
   Use Docker Buildx to build and publish multi-arch images that support amd64 and arm64.
+
   ```bash
   # create and bootstrap a buildx builder (one-time)
   docker buildx create --use --name mybuilder
@@ -133,31 +168,46 @@ IMPORTANT: this code was produced with the help of AI. It may contain mistakes o
   # build and push multi-arch image (example: amd64 + arm64)
   docker buildx build --platform linux/amd64,linux/arm64 -t yourrepo/email-server-monitoring:latest --push .
   ```
+
   Notes:
   - `--push` publishes the multi-arch manifest to your registry. If you want to load a single-arch image into your local Docker daemon, use `--load` but it only supports a single platform.
 
-- Build with docker-compose and set target architecture (single-arch build):
-  You can pass build args in `docker-compose.yml` to set the `TARGETARCH`/`TARGETOS` build args exposed by the Dockerfile. This instructs the build to compile for that architecture.
-  ```yaml
-  services:
-    email-server-monitoring:
-      build:
-        context: .
-        args:
-          TARGETOS: linux
-          TARGETARCH: arm64
-      image: email-server-monitoring:latest
-  ```
-  Important: passing build args this way produces a single-arch image for the requested arch. To produce a multi-arch manifest/image you should use `docker buildx` (see above) or CI that runs buildx.
+- Build with docker-compose (recommended — uses the `Makefile`):
+  The compose `build.args` are interpolated from the environment, so build metadata can be set dynamically. `make build` fills them automatically — `BUILD_DATE` is set to the current UTC time, `VCS_REF` to the short git SHA, and `VERSION` from the `VERSION` file:
 
-- Local binary build (same as before):
+  ```bash
+  make build                 # BUILD_DATE=now, VCS_REF=git short SHA, VERSION=$(cat VERSION)
+  make build VERSION=v1.2.3   # override any of them on the command line
+  make print                 # show the metadata that would be used
   ```
+
+  Equivalent without make:
+
+  ```bash
+  BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ) VCS_REF=$(git rev-parse --short HEAD) \
+    VERSION=$(cat VERSION) TARGETARCH=amd64 docker compose build
+  ```
+
+  Set `TARGETARCH`/`TARGETOS` (defaults `arm64`/`linux`) to compile for a specific single architecture. To produce a multi-arch manifest use `docker buildx` (see above) or the release CI.
+
+- Local binary build:
+
+  ```bash
   GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o email-server-monitoring ./main.go
   ```
+
 - Run unit testing: add tests for check functions (not included by default).
 - Local run: see Running locally section.
 
-#### Roadmap & wishlist (maybe)
+### CI / Release (GitHub Actions → GHCR)
+
+- Workflow: `.github/workflows/release.yml`. Builds the image and publishes it to GitHub Container Registry at `ghcr.io/<owner>/email-server-monitoring-docker`, tagged `:<version>` and `:latest`.
+- **Trigger**: runs **only** on commits pushed to the `release` branch (plus a manual `workflow_dispatch`). Uses the built-in `GITHUB_TOKEN` with `packages: write`.
+- **Versioning**: the published version is resolved by precedence — `workflow_dispatch` input → repository Actions variable `VERSION` (`vars.VERSION`) → the committed `VERSION` file → `v0.0.0-<shortsha>`. Bump the `VERSION` file (or set the repo variable) to cut a release.
+- **Skip a build**: trigger `workflow_dispatch` with `skip_build=true`, or include `[skip build]` / `[skip ci]` in the commit message.
+
+### Roadmap & wishlist (maybe)
+
 - [ ] Add Apprise support as an alternative notifier (Apprise supports many backends).
 - [ ] Make notifier pluggable (Gotify, Apprise, email, Slack, PagerDuty, etc.).
 - [ ] Add optional file logging with rotation (lumberjack) in addition to stdout.
@@ -177,9 +227,11 @@ IMPORTANT: this code was produced with the help of AI. It may contain mistakes o
 - [ ] Add onboarding docs, examples and troubleshooting guides for common platforms (Ubuntu, Debian, RHEL).
 - [ ] Localization / i18n for notification messages.
 
-#### Contributing
+### Contributing
+
 - Fork, implement changes in a topic branch, open a pull request with tests and description.
 - Include unit tests for new behavior and keep changes focused.
 
-#### License
+### License
+
 - GPL-3.0

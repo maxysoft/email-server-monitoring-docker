@@ -1,0 +1,35 @@
+services:
+  email-server-monitoring:
+    build:
+      context: .
+      # Build metadata is interpolated from the environment so it can be set
+      # dynamically (e.g. BUILD_DATE=now). Use the Makefile (`make build`), which
+      # auto-fills these, or export them before `docker compose build`:
+      #   BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ) VCS_REF=$(git rev-parse --short HEAD) \
+      #   VERSION=$(cat VERSION) docker compose build
+      args:
+        TARGETOS: ${TARGETOS:-linux}
+        TARGETARCH: ${TARGETARCH:-arm64}
+        VERSION: ${VERSION:-v0.0.0}
+        BUILD_DATE: ${BUILD_DATE:-unknown}
+        VCS_REF: ${VCS_REF:-main}
+    image: email-server-monitoring:latest
+    restart: unless-stopped
+    container_name: email-server-monitoring
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    user: "${PUID:-1000}:${PGID:-996}"
+    # All runtime config comes from .env (see .env.example). GOTIFY_URL and
+    # GOTIFY_TOKEN are required; everything else falls back to in-app defaults.
+    env_file:
+      - .env
+    deploy:
+      resources:
+        limits:
+          cpus: '0.1'
+          memory: 32M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"

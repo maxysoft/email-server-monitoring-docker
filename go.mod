@@ -1,3 +1,3 @@
 module github.com/maxysoft/email-server-monitoring
 
-go 1.24
+go 1.25

@@ -7,7 +7,11 @@ ARG VERSION="v0.0.0"
 ARG MAINTAINER="maxysoft"
 
 # Builder stage
-FROM --platform=${TARGETOS}/${TARGETARCH} golang:1.24-alpine AS builder
+FROM --platform=${TARGETOS}/${TARGETARCH} golang:1.25-alpine AS builder
+# Re-declare here so they are in scope for the build ENV below (global ARGs
+# declared before FROM do not propagate into a build stage automatically).
+ARG TARGETOS=linux
+ARG TARGETARCH=amd64
 RUN apk add --no-cache git ca-certificates
 WORKDIR /src
 

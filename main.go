@@ -31,7 +31,8 @@ var (
 	defaultPostRestartPollInterval      = 10
 	defaultGotifyPriority               = 5
 	defaultContainerName                = "stalwart"
-	defaultCheckIntervalSeconds         = 120 // 2 minutes
+	defaultCheckIntervalSeconds         = 120   // 2 minutes
+	defaultHTTPExpectedStatus           = "200" // comma-separated acceptable status codes (HTTP and HTTPS)
 )
 
 // Config holds runtime configuration, loaded from env or flags.
@@ -51,6 +52,7 @@ type Config struct {
 	ContainerName                string
 	DockerSocket                 string // path to docker socket (default /var/run/docker.sock)
 	CheckInterval                time.Duration
+	HTTPAcceptStatus             map[int]bool // status codes treated as "service up" for HTTP and HTTPS probes
 }
 
 // gotifyPayload matches Gotify's /message API JSON
@@ -79,31 +81,52 @@ func main() {
 		os.Exit(2)
 	}
 
-	// Setup signal handling for graceful shutdown
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	// Setup signal handling for graceful shutdown. The context is cancelled on
+	// SIGINT/SIGTERM and threaded through the whole check cycle so a shutdown
+	// interrupts in-flight probes and sleeps immediately instead of waiting for
+	// the (potentially multi-minute) post-restart polling window to finish.
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 
 	ticker := time.NewTicker(cfg.CheckInterval)
 	defer ticker.Stop()
 
 	// Run one immediate check before entering the regular schedule
-	executeCheckCycle(cfg)
+	executeCheckCycle(ctx, cfg)
 
 	for {
 		select {
 		case <-ticker.C:
-			executeCheckCycle(cfg)
-		case s := <-sigCh:
-			log.Printf("Received signal %s, shutting down.", s)
+			executeCheckCycle(ctx, cfg)
+		case <-ctx.Done():
+			log.Println("Received shutdown signal, shutting down.")
 			return
 		}
 	}
 }
 
+// sleepCtx sleeps for d, returning early with false if the context is cancelled.
+func sleepCtx(ctx context.Context, d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-t.C:
+		return true
+	}
+}
+
 // executeCheckCycle runs the check/restart workflow once
-func executeCheckCycle(cfg *Config) {
+func executeCheckCycle(ctx context.Context, cfg *Config) {
 	log.Println("Starting scheduled check cycle...")
-	allOK, failedList := runAllChecks(cfg, cfg.PerAttemptTimeout)
+	allOK, failedList := runAllChecks(ctx, cfg, cfg.PerAttemptTimeout)
+	// If we are shutting down, probes were aborted mid-flight and would report
+	// false failures — never act on that. Bail out without notifying or restarting.
+	if ctx.Err() != nil {
+		log.Println("Shutdown in progress; aborting check cycle.")
+		return
+	}
 	if allOK {
 		log.Println("All services healthy; nothing to do this cycle.")
 		return
@@ -144,10 +167,13 @@ func executeCheckCycle(cfg *Config) {
 	log.Println("Restart API returned success. Waiting before post-restart checks...")
 
 	// Wait before starting post-restart checks
-	time.Sleep(cfg.PostRestartWait)
+	if !sleepCtx(ctx, cfg.PostRestartWait) {
+		log.Println("Shutdown in progress; aborting post-restart checks.")
+		return
+	}
 
 	// Do initial post-restart checks with longer per-attempt timeout
-	recovered, _ := runAllChecks(cfg, cfg.PostRestartPerAttemptTimeout)
+	recovered, _ := runAllChecks(ctx, cfg, cfg.PostRestartPerAttemptTimeout)
 	if recovered {
 		log.Println("All services recovered after restart (initial check).")
 		title := fmt.Sprintf("✅ %s restarted successfully — connectivity restored", cfg.ContainerName)
@@ -163,8 +189,11 @@ func executeCheckCycle(cfg *Config) {
 	// If not recovered immediately, poll for up to final timeout
 	start := time.Now()
 	for time.Since(start) < cfg.PostRestartFinalTimeout {
-		time.Sleep(cfg.PostRestartPollInterval)
-		recovered, _ = runAllChecks(cfg, cfg.PostRestartPerAttemptTimeout)
+		if !sleepCtx(ctx, cfg.PostRestartPollInterval) {
+			log.Println("Shutdown in progress; aborting post-restart poll.")
+			return
+		}
+		recovered, _ = runAllChecks(ctx, cfg, cfg.PostRestartPerAttemptTimeout)
 		if recovered {
 			log.Printf("Services recovered within %s after restart.", time.Since(start).Round(time.Second))
 			title := fmt.Sprintf("✅ %s restarted and connectivity restored", cfg.ContainerName)
@@ -180,7 +209,7 @@ func executeCheckCycle(cfg *Config) {
 	// Not recovered within final timeout — notify manual intervention required
 	log.Printf("ERROR: Services did not recover within %s after restart.", cfg.PostRestartFinalTimeout)
 	title := fmt.Sprintf("🚨 Manual intervention needed — '%s' still unreachable", cfg.ContainerName)
-	_, finalFailed := collectFailedServices(cfg, cfg.PostRestartPerAttemptTimeout)
+	_, finalFailed := collectFailedServices(ctx, cfg, cfg.PostRestartPerAttemptTimeout)
 	body := fmt.Sprintf("%s\nAfter restarting '%s' and waiting %s, the following services are still unreachable: %s\nPlease investigate and perform manual intervention.",
 		nowUTC(), cfg.ContainerName, cfg.PostRestartFinalTimeout, strings.Join(finalFailed, ", "))
 	if err := sendGotify(cfg, title, body, 10); err != nil {
@@ -235,6 +264,33 @@ func loadConfigFromEnvOrFlags() *Config {
 		cfg.DockerSocket = "/var/run/docker.sock"
 	}
 
+	// HTTP_EXPECTED_STATUS: comma-separated status codes that count as "service up"
+	// for both HTTP and HTTPS probes (default 200). Invalid tokens are ignored; if
+	// none parse, fall back to 200.
+	cfg.HTTPAcceptStatus = parseStatusSet(getenvOr("HTTP_EXPECTED_STATUS", defaultHTTPExpectedStatus))
+
+	// Guard durations that must be strictly positive. A zero/negative value from
+	// a bad env override would otherwise crash or spin:
+	//   - CheckInterval == 0      -> time.NewTicker panics ("non-positive interval")
+	//   - PollInterval  == 0      -> time.Sleep(0) busy-loops the post-restart poll
+	//   - any *Timeout  <= 0      -> context expires instantly -> every probe fails -> restart loop
+	clampPositive := func(name string, d time.Duration, def int) time.Duration {
+		if d <= 0 {
+			log.Printf("WARN: %s must be > 0, got %s; using default %ds", name, d, def)
+			return time.Duration(def) * time.Second
+		}
+		return d
+	}
+	cfg.CheckInterval = clampPositive("CHECK_INTERVAL_SECONDS", cfg.CheckInterval, defaultCheckIntervalSeconds)
+	cfg.PerAttemptTimeout = clampPositive("PER_ATTEMPT_TIMEOUT", cfg.PerAttemptTimeout, defaultPerAttemptTimeoutSeconds)
+	cfg.PostRestartPerAttemptTimeout = clampPositive("POST_RESTART_PER_ATTEMPT_TIMEOUT", cfg.PostRestartPerAttemptTimeout, defaultPostRestartPerAttemptSeconds)
+	cfg.PostRestartPollInterval = clampPositive("POST_RESTART_POLL_INTERVAL", cfg.PostRestartPollInterval, defaultPostRestartPollInterval)
+	cfg.PostRestartFinalTimeout = clampPositive("POST_RESTART_FINAL_TIMEOUT", cfg.PostRestartFinalTimeout, defaultPostRestartFinalTimeout)
+	if cfg.Retries < 1 {
+		log.Printf("WARN: RETRIES must be >= 1, got %d; using 1", cfg.Retries)
+		cfg.Retries = 1
+	}
+
 	return cfg
 }
 
@@ -268,28 +324,65 @@ func nowUTC() string {
 	return time.Now().UTC().Format(time.RFC3339)
 }
 
-// runAllChecks runs all configured service checks. It returns (allOK bool, failedList []string)
-func runAllChecks(cfg *Config, perAttemptTimeout time.Duration) (bool, []string) {
+// parseStatusSet parses a comma-separated list of HTTP status codes into a set.
+// Invalid or out-of-range tokens are logged and skipped; if nothing valid
+// remains, it falls back to {200}.
+func parseStatusSet(s string) map[int]bool {
+	set := map[int]bool{}
+	for _, tok := range strings.Split(s, ",") {
+		tok = strings.TrimSpace(tok)
+		if tok == "" {
+			continue
+		}
+		code, err := strconv.Atoi(tok)
+		if err != nil || code < 100 || code > 599 {
+			log.Printf("WARN: ignoring invalid HTTPS_EXPECTED_STATUS code %q", tok)
+			continue
+		}
+		set[code] = true
+	}
+	if len(set) == 0 {
+		set[http.StatusOK] = true
+	}
+	return set
+}
+
+// runAllChecks runs all configured service checks. It returns (allOK bool, failedList []string).
+// The parent ctx is honored: if it is cancelled (shutdown), checks abort early — callers must
+// inspect ctx.Err() before acting on the result, since aborted probes report as failures.
+func runAllChecks(ctx context.Context, cfg *Config, perAttemptTimeout time.Duration) (bool, []string) {
 	failed := []string{}
 	for _, svc := range cfg.Services {
+		if ctx.Err() != nil {
+			break
+		}
 		parts := strings.SplitN(svc, ":", 2)
 		if len(parts) != 2 {
 			continue
 		}
 		name := strings.TrimSpace(parts[0])
 		portStr := strings.TrimSpace(parts[1])
-		port, _ := strconv.Atoi(portStr)
+		port, err := strconv.Atoi(portStr)
+		if err != nil || port < 1 || port > 65535 {
+			// Misconfigured entry — skip it rather than probing port 0 (which would
+			// always fail and trigger a needless container restart).
+			log.Printf("WARN: skipping service %q: invalid port %q", svc, portStr)
+			continue
+		}
 
 		ok := false
 		for attempt := 1; attempt <= cfg.Retries; attempt++ {
-			ctx, cancel := context.WithTimeout(context.Background(), perAttemptTimeout)
-			ok = runSingleCheck(ctx, cfg.Host, name, port)
+			cctx, cancel := context.WithTimeout(ctx, perAttemptTimeout)
+			ok = runSingleCheck(cctx, cfg, name, port)
 			cancel()
 			if ok {
 				break
 			}
 			if attempt < cfg.Retries {
-				time.Sleep(cfg.SleepBetweenAttempts)
+				// Cancellable inter-attempt sleep so shutdown is not delayed.
+				if !sleepCtx(ctx, cfg.SleepBetweenAttempts) {
+					break
+				}
 			}
 		}
 		if !ok {
@@ -300,22 +393,24 @@ func runAllChecks(cfg *Config, perAttemptTimeout time.Duration) (bool, []string)
 }
 
 // collectFailedServices is like runAllChecks but collects and returns the failed list.
-func collectFailedServices(cfg *Config, perAttemptTimeout time.Duration) (bool, []string) {
-	return runAllChecks(cfg, perAttemptTimeout)
+func collectFailedServices(ctx context.Context, cfg *Config, perAttemptTimeout time.Duration) (bool, []string) {
+	return runAllChecks(ctx, cfg, perAttemptTimeout)
 }
 
-func runSingleCheck(ctx context.Context, host, name string, port int) bool {
+func runSingleCheck(ctx context.Context, cfg *Config, name string, port int) bool {
 	switch strings.ToUpper(name) {
 	case "SMTP":
-		return checkSMTP(ctx, host, port)
+		return checkSMTP(ctx, cfg.Host, port)
 	case "SMTPS":
-		return checkTLSHandshake(ctx, host, port)
+		return checkTLSHandshake(ctx, cfg.Host, port)
 	case "IMAPS":
-		return checkTLSHandshake(ctx, host, port) // treat same as SMTPS for handshake
+		return checkTLSHandshake(ctx, cfg.Host, port) // treat same as SMTPS for handshake
+	case "HTTP":
+		return checkHTTPStatus(ctx, "http", cfg.Host, port, cfg.HTTPAcceptStatus)
 	case "HTTPS":
-		return checkHTTPS(ctx, host, port)
+		return checkHTTPStatus(ctx, "https", cfg.Host, port, cfg.HTTPAcceptStatus)
 	default:
-		return checkTCP(ctx, host, port)
+		return checkTCP(ctx, cfg.Host, port)
 	}
 }
 
@@ -357,51 +452,56 @@ func checkSMTP(ctx context.Context, host string, port int) bool {
 }
 
 func checkTLSHandshake(ctx context.Context, host string, port int) bool {
-	// Use tls.DialWithDialer with a net.Dialer that uses ctx
-	d := &net.Dialer{}
+	// tls.Dialer.DialContext is context-native: cancelling ctx (timeout or
+	// shutdown) aborts the dial and TLS handshake directly. This avoids the old
+	// goroutine+channel workaround, which could leave a dial goroutine blocked on
+	// the OS TCP timeout (~2 min) against a filtered port long after we returned.
 	addr := net.JoinHostPort(host, strconv.Itoa(port))
-	// Build a context-aware dialer by dialing with a goroutine and channel
-	type result struct {
-		conn *tls.Conn
-		err  error
-	}
-	ch := make(chan result, 1)
-	go func() {
-		conn, err := tls.DialWithDialer(d, "tcp", addr, &tls.Config{
+	d := &tls.Dialer{
+		Config: &tls.Config{
 			InsecureSkipVerify: true, // local infra may use self-signed certs
 			ServerName:         host,
-		})
-		ch <- result{conn: conn, err: err}
-	}()
-	select {
-	case <-ctx.Done():
-		return false
-	case res := <-ch:
-		if res.err != nil {
-			return false
-		}
-		_ = res.conn.Close()
-		return true
+		},
 	}
+	conn, err := d.DialContext(ctx, "tcp", addr)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
 }
 
-func checkHTTPS(ctx context.Context, host string, port int) bool {
-	// Use http Client with timeout from ctx
+// checkHTTPStatus probes an HTTP or HTTPS endpoint (scheme is "http" or "https")
+// and reports whether the response status is in the accepted set.
+func checkHTTPStatus(ctx context.Context, scheme, host string, port int, acceptStatus map[int]bool) bool {
+	// One-shot connectivity probe: disable keep-alives so the underlying socket is
+	// closed as soon as the response is read, and close any idle connection the
+	// transport may still hold. Without this every probe leaks one ESTABLISHED
+	// socket, since http.Transport pools idle keep-alive connections indefinitely.
+	// TLSClientConfig is set for the https case and ignored for plain http.
 	transport := &http.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		TLSClientConfig:   &tls.Config{InsecureSkipVerify: true},
+		DisableKeepAlives: true,
 	}
+	defer transport.CloseIdleConnections()
 	client := &http.Client{
 		Transport: transport,
 	}
 	// Build request with context
-	url := fmt.Sprintf("https://%s:%d/", host, port)
+	url := fmt.Sprintf("%s://%s:%d/", scheme, host, port)
 	req, _ := http.NewRequestWithContext(ctx, http.MethodHead, url, nil)
 	resp, err := client.Do(req)
 	if err != nil {
 		return false
 	}
 	defer resp.Body.Close()
-	return resp.StatusCode == http.StatusOK
+	// A healthy server is expected to answer with one of the configured status
+	// codes (default 200). Operators that front the service with a redirect or
+	// auth gate can widen the accepted set via HTTP_EXPECTED_STATUS.
+	if len(acceptStatus) == 0 {
+		return resp.StatusCode == http.StatusOK
+	}
+	return acceptStatus[resp.StatusCode]
 }
 
 // sendGotify posts a message to the Gotify server. optional priority override
@@ -452,6 +552,7 @@ func restartContainer(cfg *Config) error {
 			return d.DialContext(ctx, "unix", socketPath)
 		},
 	}
+	defer transport.CloseIdleConnections()
 	client := &http.Client{
 		Transport: transport,
 		Timeout:   30 * time.Second,
