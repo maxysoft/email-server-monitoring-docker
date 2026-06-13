@@ -199,12 +199,26 @@ All runtime configuration is loaded from `.env` via the compose `env_file:` dire
 - Run unit testing: add tests for check functions (not included by default).
 - Local run: see Running locally section.
 
-### CI / Release (GitHub Actions → GHCR)
+### Continuous integration
 
-- Workflow: `.github/workflows/release.yml`. Builds the image and publishes it to GitHub Container Registry at `ghcr.io/<owner>/email-server-monitoring-docker`, tagged `:<version>` and `:latest`.
-- **Trigger**: runs **only** on commits pushed to the `release` branch (plus a manual `workflow_dispatch`). Uses the built-in `GITHUB_TOKEN` with `packages: write`.
+On every push to `master`/`release` and on pull requests:
+
+- **CI** (`.github/workflows/ci.yml`): `gofmt`, `go vet`, `go build`, `staticcheck`, `govulncheck`, `hadolint` (Dockerfile), and `gitleaks` (secret scan over full history).
+- **CodeQL** (`.github/workflows/codeql.yml`): static security analysis for Go. Free on public repos; private repos need GitHub Advanced Security — disable the workflow if neither applies.
+
+### Release / publish (GitHub Actions → GHCR)
+
+- Workflow: `.github/workflows/release.yml`. Builds a **multi-arch** image (`linux/amd64`, `linux/arm64`), publishes it to GitHub Container Registry at `ghcr.io/<owner>/email-server-monitoring-docker` tagged `:<version>` and `:latest`, and **signs it with cosign** (keyless, via GitHub OIDC — no keys to manage).
+- **Trigger**: runs **only** on commits pushed to the `release` branch (plus a manual `workflow_dispatch`). Uses the built-in `GITHUB_TOKEN` (`packages: write`, `id-token: write`).
 - **Versioning**: the published version is resolved by precedence — `workflow_dispatch` input → repository Actions variable `VERSION` (`vars.VERSION`) → the committed `VERSION` file → `v0.0.0-<shortsha>`. Bump the `VERSION` file (or set the repo variable) to cut a release.
 - **Skip a build**: trigger `workflow_dispatch` with `skip_build=true`, or include `[skip build]` / `[skip ci]` in the commit message.
+- **Verify a published image's signature**:
+
+  ```bash
+  cosign verify ghcr.io/<owner>/email-server-monitoring-docker:<version> \
+    --certificate-identity-regexp '^https://github.com/<owner>/email-server-monitoring-docker/' \
+    --certificate-oidc-issuer https://token.actions.githubusercontent.com
+  ```
 
 ### Roadmap & wishlist (maybe)
 

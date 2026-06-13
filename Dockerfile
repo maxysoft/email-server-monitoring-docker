@@ -6,10 +6,12 @@ ARG VCS_REF=""
 ARG VERSION="v0.0.0"
 ARG MAINTAINER="maxysoft"
 
-# Builder stage
-FROM --platform=${TARGETOS}/${TARGETARCH} golang:1.25-alpine AS builder
-# Re-declare here so they are in scope for the build ENV below (global ARGs
-# declared before FROM do not propagate into a build stage automatically).
+# Builder stage. Run the builder on the NATIVE build platform and let Go
+# cross-compile to the target OS/arch (GOOS/GOARCH set below). This makes
+# multi-arch builds (buildx --platform) fast — no QEMU emulation of the toolchain.
+FROM --platform=${BUILDPLATFORM} golang:1.25-alpine AS builder
+# TARGETOS/TARGETARCH are auto-populated per target platform by buildx; re-declare
+# to bring them into this stage's scope (defaults cover a plain `docker build`).
 ARG TARGETOS=linux
 ARG TARGETARCH=amd64
 RUN apk add --no-cache git ca-certificates

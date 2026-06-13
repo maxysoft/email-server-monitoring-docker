@@ -25,8 +25,11 @@ Docker Engine HTTP API, notifying Gotify.
 2. **Versioning**: `--build-arg VERSION=vX.Y.Z` is stamped into the OCI image label (no
    source-embedded constant). The release workflow resolves version as: dispatch input →
    `vars.VERSION` → `./VERSION` file (committed) → `v0.0.0-<sha>`. Bump `VERSION` for a release.
-   Release CI: `.github/workflows/release.yml` builds + pushes to GHCR **only on the `release`
-   branch**; skip a run via `skip_build=true` (manual) or `[skip build]`/`[skip ci]` in the commit.
+   Release CI: `.github/workflows/release.yml` builds a multi-arch image (amd64+arm64), pushes
+   to GHCR, and cosign-signs it — **only on the `release` branch**; skip via `skip_build=true`
+   (manual) or `[skip build]`/`[skip ci]` in the commit. Validation CI (`ci.yml`: gofmt/vet/
+   build/staticcheck/govulncheck/hadolint/gitleaks) + CodeQL run on push/PR. Dockerfile builder
+   runs on `$BUILDPLATFORM` and cross-compiles — don't pin it to the target arch (forces QEMU).
 3. **Communication style: caveman is always loaded.** Internal reasoning + progress updates in
    caveman; final user-facing summary in normal, professional English. See CLAUDE.md
    "Communication style" — it overrides session hooks.

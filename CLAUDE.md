@@ -91,16 +91,24 @@ build procedure, or a newly verified gotcha.
 - Versioning: pass the release tag via `--build-arg VERSION=vX.Y.Z`; it is stamped into the
   OCI `org.opencontainers.image.version` label. No source-embedded version constant.
 
-### CI / Release (GitHub Actions → GHCR)
+### CI / Release (GitHub Actions)
 
-- Workflow: `.github/workflows/release.yml`. Builds and pushes to
-  `ghcr.io/<owner>/email-server-monitoring-docker` **only** on push to the `release` branch
-  (plus manual `workflow_dispatch`). Needs `packages: write` (uses the built-in `GITHUB_TOKEN`).
+- **CI** (`.github/workflows/ci.yml`, on push to master/release + PRs): `gofmt`, `go vet`,
+  `go build`, `staticcheck`, `govulncheck`, `hadolint` (failure-threshold `error` — alpine
+  pin warnings stay informational), `gitleaks` (full-history secret scan). **CodeQL**
+  (`codeql.yml`) for Go — free on public repos only.
+- **Release** (`.github/workflows/release.yml`): builds a **multi-arch** image
+  (`linux/amd64,linux/arm64`), pushes to `ghcr.io/<owner>/email-server-monitoring-docker`,
+  and **cosign keyless-signs** it (needs `id-token: write`). Runs **only** on push to the
+  `release` branch (plus manual `workflow_dispatch`).
 - **Version resolution** (precedence): `workflow_dispatch` `version` input → repo Actions
   variable `VERSION` (`vars.VERSION`) → `./VERSION` file → `v0.0.0-<shortsha>`. Tags pushed:
-  `:<version>` and `:latest`. Bump `VERSION` (committed, currently `v0.1.0`) to drive a release.
+  `:<version>` and `:latest`. Bump `VERSION` (committed) to drive a release.
 - **Skip build**: set `skip_build=true` on a manual run, or include `[skip build]` / `[skip ci]`
   in the commit message — the job's `if:` guard then skips.
+- **Dockerfile multi-arch**: builder runs on `$BUILDPLATFORM` and Go cross-compiles to
+  `$TARGETOS/$TARGETARCH` (no QEMU). Keep that — pinning the builder to the target platform
+  would force slow emulation under buildx.
 
 ### Known Gotchas
 
